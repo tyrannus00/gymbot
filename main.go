@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/bwmarrin/discordgo"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -18,6 +19,17 @@ const KgToLbs = 2.20462
 const CommandPrefix rune = '.'
 
 func main() {
+	go func() {
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "I am online")
+		})
+
+		err := http.ListenAndServe(":8080", nil)
+		if err != nil {
+			fmt.Println("Error starting server:", err)
+		}
+	}()
+
 	sess, err := discordgo.New(fmt.Sprintf("Bot %v", getToken()))
 
 	if err != nil {
