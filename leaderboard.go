@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"time"
 )
 
 const benchLeaderboardsFile = "benchleaderboards.json"
@@ -35,7 +36,22 @@ func GetPr(userId string, exercise exercises.Exercise) (float64, bool) {
 	return val, exists
 }
 
-func saveLeaderBoards() {
+func autoSave() {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				saveAll()
+			}
+		}
+	}()
+
+}
+
+func saveAll() {
 	save(benchLeaderboardsFile, benchPrs)
 	save(squatLeaderboardsFile, squatPrs)
 	save(deadliftLeaderboardsFile, deadliftPrs)

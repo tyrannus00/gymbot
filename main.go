@@ -19,16 +19,8 @@ const KgToLbs = 2.20462
 const CommandPrefix rune = '.'
 
 func main() {
-	go func() {
-		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "I am online")
-		})
-
-		err := http.ListenAndServe(":8080", nil)
-		if err != nil {
-			fmt.Println("Error starting server:", err)
-		}
-	}()
+	go keepAlive()
+	autoSave()
 
 	sess, err := discordgo.New(fmt.Sprintf("Bot %v", getToken()))
 
@@ -37,7 +29,7 @@ func main() {
 	}
 
 	sess.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		if m.Author.ID == sess.State.User.ID {
+		if m.Author.ID == sess.State.User.ID || len(m.Content) == 0 {
 			return
 		}
 
@@ -72,13 +64,24 @@ func main() {
 	}
 
 	defer sess.Close()
-	defer saveLeaderBoards()
+	defer saveAll()
 
 	fmt.Println("Online")
 
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
+}
+
+func keepAlive() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "I am online")
+	})
+
+	err := http.ListenAndServe(":8080", nil)
+	if err != nil {
+		fmt.Println("Error starting server:", err)
+	}
 }
 
 func handleCommands(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -88,9 +91,8 @@ func handleCommands(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	split := strings.Split(m.Content, " ")
-	test := fmt.Sprintf("%cpr", CommandPrefix)
 
-	if split[0] == test {
+	if split[0] == fmt.Sprintf("%cpr", CommandPrefix) {
 		handlePrCommand(split, s, m)
 	} else if split[0] == fmt.Sprintf("%cleaderboard", CommandPrefix) {
 		handleLeaderboardCommand(split, s, m)
@@ -99,6 +101,11 @@ func handleCommands(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func handleLeaderboardCommand(split []string, s *discordgo.Session, m *discordgo.MessageCreate) {
+	if len(split) != 2 {
+		s.ChannelMessageSend(m.ChannelID, "Correct syntax for 'leaderboard' command is .leaderboard <lift>\nValid options for lifts are 'bench', 'squat', 'deadlift' or 'total'")
+		return
+	}
+
 	exerciseString := split[1]
 	var exercise exercises.Exercise
 
@@ -108,12 +115,30 @@ func handleLeaderboardCommand(split []string, s *discordgo.Session, m *discordgo
 		exercise = exercises.SQUAT
 	} else if exerciseString == "deadlift" {
 		exercise = exercises.DEADLIFT
-	} else {
-		s.ChannelMessageSend(m.ChannelID, "Invalid lift!\nValid options for lifts are 'bench', 'squat' or 'deadlift'")
+	} else if exerciseString != "total" {
+		s.ChannelMessageSend(m.ChannelID, "Invalid lift!\nValid options for lifts are 'bench', 'squat', 'deadlift' or 'total'")
 		return
 	}
 
-	prs := liftPrs[exercise]
+	var prs map[string]float64
+	if exercise == nil { // total
+		prs = map[string]float64{}
+
+		for id, pr := range benchPrs {
+			prs[id] = pr
+		}
+
+		for id, pr := range squatPrs {
+			prs[id] += pr
+		}
+
+		for id, pr := range deadliftPrs {
+			prs[id] += pr
+		}
+	} else {
+		prs = liftPrs[exercise]
+	}
+
 	keys := make([]string, 0.0, len(prs))
 
 	for key := range prs {
@@ -134,7 +159,7 @@ func handleLeaderboardCommand(split []string, s *discordgo.Session, m *discordgo
 		}
 		weight := prs[key]
 
-		builder.WriteString(fmt.Sprintf("%s: %.2f kg (%.2f lbs)\n", user.GlobalName, weight, weight*KgToLbs))
+		builder.WriteString(fmt.Sprintf("%s: %.2f kg (%.2f lbs)\n", user.Username, weight, weight*KgToLbs))
 	}
 
 	embed := &discordgo.MessageEmbed{
@@ -147,7 +172,7 @@ func handleLeaderboardCommand(split []string, s *discordgo.Session, m *discordgo
 }
 
 func handlePrCommand(split []string, s *discordgo.Session, m *discordgo.MessageCreate) {
-	if len(split) != 4 {
+	if len(split) < 2 {
 		s.ChannelMessageSend(m.ChannelID, "Correct syntax for 'pr' command is .pr <lift> <amount> <unit>\nValid options for lifts are 'bench', 'squat' or 'deadlift'.")
 		return
 	}
@@ -161,8 +186,45 @@ func handlePrCommand(split []string, s *discordgo.Session, m *discordgo.MessageC
 		exercise = exercises.SQUAT
 	} else if lift == "deadlift" {
 		exercise = exercises.DEADLIFT
-	} else {
+	} else if lift != "total" || len(split) == 4 {
 		s.ChannelMessageSend(m.ChannelID, "Invalid lift!\nValid options for lifts are 'bench', 'squat' or 'deadlift'")
+		return
+	}
+
+	if len(split) == 2 {
+		if exercise == nil {
+			total := liftPrs[exercises.BENCH][m.Author.ID]
+			total += liftPrs[exercises.SQUAT][m.Author.ID]
+			total += liftPrs[exercises.DEADLIFT][m.Author.ID]
+
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Your total is %.2fkg (%.2f lbs).", total, total*KgToLbs))
+		} else {
+			pr := liftPrs[exercise][m.Author.ID]
+
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Your %s pr is %.2fkg (%.2f lbs).", lift, pr, pr*KgToLbs))
+		}
+
+		return
+	} else if len(split) == 3 {
+		name := split[2]
+		if search, err := s.GuildMembersSearch(m.GuildID, name, 1000); err == nil && len(search) > 0 {
+			user := search[0].User
+
+			if exercise == nil {
+				total := liftPrs[exercises.BENCH][user.ID]
+				total += liftPrs[exercises.SQUAT][user.ID]
+				total += liftPrs[exercises.DEADLIFT][user.ID]
+
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("%s's total is %.2fkg (%.2f lbs).", user.Username, total, total*KgToLbs))
+			} else if pr, exists := liftPrs[exercise][user.ID]; exists {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("%s's %s pr is %.2fkg (%.2f lbs).", user.Username, lift, pr, pr*KgToLbs))
+			} else if exercise == nil {
+			} else {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("%s hasn't set a pr for %s yet!", user.Username, lift))
+			}
+		} else {
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Can't find user %s!", name))
+		}
 		return
 	}
 
